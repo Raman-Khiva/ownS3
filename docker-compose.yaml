@@ -1,0 +1,15 @@
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ownS3
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ownS3
+    volumes:
+      - postgres_data:/var/lib/postgres/data
+
+
+
+volumes:
+  postgres_data:
