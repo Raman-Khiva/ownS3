@@ -57,7 +57,7 @@ func main() {
 		fmt.Fprint(w, message)
 	})
 
-	addr := ":4000"
+	addr := ":9000"
 	log.Printf("Server listening on http://localhost%s", addr)
 
 	if err := http.ListenAndServe(addr, loggingMiddleware(mux)); err != nil {

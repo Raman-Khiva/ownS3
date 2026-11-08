@@ -9,6 +9,13 @@ services:
     volumes:
       - postgres_data:/var/lib/postgres/data
 
+  api:
+    build:
+      dockerfile: Dockerfile
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./:/app
 
 
 volumes:
