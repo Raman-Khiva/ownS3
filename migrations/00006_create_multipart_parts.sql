@@ -15,9 +15,9 @@ CREATE TABLE multipart_parts(
   uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
 
- UNIQUE(upload_id, part_number),
+ UNIQUE(upload_id, part_number)
 
 
 );
 -- +goose Down
-DROP TABLE multipart_uploads;
+DROP TABLE multipart_parts;

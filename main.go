@@ -19,7 +19,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 var buckets []string
 
-const bucketsDir = "./buckets"
+const bucketsDir = "./internals/storage/buckets"
 
 func main() {
 	mux := http.NewServeMux()
