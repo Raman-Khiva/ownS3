@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log"
+	"main/internal/database"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -19,52 +23,108 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 var buckets []string
 
-const bucketsDir = "./internals/storage/buckets"
+const bucketsDir = "./internal/storage/buckets"
 
+var database_url string = os.Getenv("DATABASE_URL")
+
+// main function
 func main() {
 	mux := http.NewServeMux()
+
+	fmt.Println("DATABASE_URl", database_url)
+
+	//pool creation
+	pool, err := pgxpool.New(context.Background(), database_url)
+
+	if err != nil {
+		log.Fatal("error while creating pool", err)
+	}
+
+	queries := database.New(pool)
+
+	// pool pinging
+	if err := pool.Ping(context.Background()); err != nil {
+		pool.Close()
+		log.Fatal("Error while pinging pool", err)
+	} else {
+		fmt.Print("pool pinging was successfull")
+	}
+
 	// get ping route
-	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "pong")
 	})
 
-
-
 	//object routes
-
 	// put object in bucket route
-	mux.HandleFunc("PUT /{bucket}/{key}", func(w http.ResponseWriter, r *http.Request){
+	mux.HandleFunc("PUT /upload", func(w http.ResponseWriter, r *http.Request) {
+
+		// bucketName := r.PathValue("bucket")
+		// object_key := r.PathValue("key")
+
+		// parse file stream into file
+		if err := r.ParseMultipartForm(30 << 20); err != nil {
+			log.Fatal("error while parsing file", err)
+			http.Error(w, "error while parsing object", http.StatusBadRequest)
+			return
+		}
+
+		// get parsed file
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			log.Fatal("Error while geting file from req :", err)
+			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
+			return
+		}
+
+		defer file.Close()
+
+		// Create destination file
+		dst, err := os.Create(header.Filename)
+		if err != nil {
+			http.Error(w, "error while creating destination", http.StatusInternalServerError)
+			return
+		}
+
+		defer dst.Close()
+
+		// save file data to dst
+		if _, err := io.Copy(dst, file); err != nil {
+			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
+			return
+		}
+
+		// return final
+		fmt.Fprint(w, "Saved %s (%d bytes)", header.Filename, header.Size)
 
 	})
 
 	// get object route i.e. download object
-	mux.HandleFunc("GET /{bucket}/{key}", func(w http.ResponseWriter, r *http.Request){
+	mux.HandleFunc("GET /{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Print("get object route called")
 
 	})
-
 
 	// head object route i.e. get metadata of object
-	mux.HandleFunc("HEAD /{bucket}/{key}", func(w http.ResposneWriter, r * http.Request){
-
+	mux.HandleFunc("HEAD /{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Print("head objects route called")
 	})
-
 
 	// delete object from a bucket route
-	mux.HandleFunc("DELETE /{bucket}/{key}", func(w http.ResponseWriter, r* http.Request){
+	mux.HandleFunc("DELETE /{bucket}/{key}", func(w http.ResponseWriter, r *http.Request) {
 
 	})
-
 
 	// bucket routes
 
 	// head bucket route
-		mux.HnadleFunc("HEAD /{bucket}", func(w http.ResponseWriter, r *http.Request)){
+	// mux.HandleFunc("HEAD /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
-		}
-
+	// 	fmt.Print("head objects route called")
+	// })
 	// get objects in bucket
 
-		mux.HandleFunc("GET /{bucket}", func(w http.ResponseWriter, r *http.Request){
+	mux.HandleFunc("GET /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
 	})
 
@@ -74,43 +134,71 @@ func main() {
 	})
 
 	// put bucket route
-	mux.HandleFunc("PUT /buckets/{bucketId}", func(w http.ResponseWriter, r *http.Request) {
-		bucketId := r.PathValue("bucketId")
+	mux.HandleFunc("PUT /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
-		dir := filepath.Join(bucketsDir, bucketId)
+		bucketName := r.PathValue("bucket")
+		ctx := r.Context()
 
-		var found bool = false
+		// Check whether bucket exists
+		exists, err := queries.ExistsBucketByName(ctx, bucketName)
 
-		for _, bucket := range buckets {
-			if bucket == bucketId {
-				found = true
-				break
-			}
+		if err != nil {
+			log.Printf("error checking bucket: %v", err)
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
 		}
 
-		if !found {
-			buckets = append(buckets, bucketId)
-			os.MkdirAll(dir, 0755)
+		if exists {
+			http.Error(w, "Bucket already exists", http.StatusConflict)
+			return
 		}
 
-		var message string
-		if found {
-			message = "bucket already exists"
-		} else {
-			message = "bucket created successfully"
+		// Create bucket
+		createdBucket, err := queries.CreateBucket(ctx, bucketName)
+
+		if err != nil {
+			log.Printf("error creating bucket: %v", err)
+			http.Error(w, "Failed to create bucket", http.StatusInternalServerError)
+			return
 		}
-		fmt.Fprint(w, message)
+
+		fmt.Fprintf(w,
+			"Bucket created successfully. Name: %s, ID: %v",
+			createdBucket.Name,
+			createdBucket.ID,
+		)
 	})
+	// mux.HandleFunc("PUT /{bucket}", func(w http.ResponseWriter, r *http.Request) {
+	// 	// fetch bucketId from params
+	// 	bucketName := r.PathValue("bucket")
+
+	// 	//check bucket name in database
+	// 	if err != nil {
+	// 		log.Fatal("error while finding bucketName in db", err)
+	// 		fmt.Fprint(w, "error while find bucket in db")
+	// 		return
+	// 	}
+
+	// 	if exists {
+	// 		fmt.Fprint(w, "bucket exists")
+	// 		return
+	// 	}
+
+	// 	if err != nil {
+	// 		log.Fatal("error while creating bucket", err)
+	// 		fmt.Fprint(w, "error while creating bucket")
+	// 	}
+
+	// 	fmt.Fprint(w, "bucket created sucessfull.", "bucket name: ", createBucket.Name, "bucket id: ", createBucket.ID)
+	// })
 
 	// delete bucket route
-    mux.HandleFunc("DELETE /{bucket}",func(w http.ResponseWriter, r* http.Request){
+	mux.HandleFunc("DELETE /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
-    })
-
+	})
 
 	addr := ":9000"
 	log.Printf("Server listening on http://localhost%s", addr)
-
 	if err := http.ListenAndServe(addr, loggingMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}

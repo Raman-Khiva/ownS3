@@ -9,6 +9,25 @@ import (
 	"context"
 )
 
+const createBucket = `-- name: CreateBucket :one
+INSERT INTO buckets (name)
+VALUES ($1)
+RETURNING id, name, region, versioning_enabled, created_at
+`
+
+func (q *Queries) CreateBucket(ctx context.Context, name string) (Bucket, error) {
+	row := q.db.QueryRow(ctx, createBucket, name)
+	var i Bucket
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Region,
+		&i.VersioningEnabled,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const existsBucketByName = `-- name: ExistsBucketByName :one
 SELECT EXISTS (SELECT 1 FROM buckets WHERE name = $1)
 `
@@ -18,4 +37,21 @@ func (q *Queries) ExistsBucketByName(ctx context.Context, name string) (bool, er
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const getBucketByName = `-- name: GetBucketByName :one
+SELECT id, name, region, versioning_enabled, created_at FROM buckets WHERE name=$1
+`
+
+func (q *Queries) GetBucketByName(ctx context.Context, name string) (Bucket, error) {
+	row := q.db.QueryRow(ctx, getBucketByName, name)
+	var i Bucket
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Region,
+		&i.VersioningEnabled,
+		&i.CreatedAt,
+	)
+	return i, err
 }
