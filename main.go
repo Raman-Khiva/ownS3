@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -93,58 +95,55 @@ func main() {
 		params.StorageKey = key
 
 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
-		bucket, err := queries.GetBucketByName(ctx,bucketName)
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
 
-		switch{
-			case errors.Is(err, sql.ErrNoRows):
-				http.Error(w,"bucket does not exist", http.StatusNotFound)
-				return
-			case err != nil{
-				http.Error(w, "bucket name validation failed", http.StatusBadRequest)
-				return
-			}
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			return
 		}
-		params.BucketID = bucket.Id
-
+		params.BucketID = bucket.ID
 
 		// 4	Validate object key	Ensure the object key is valid and safe
-		objectExists, err := queries.ObjectExsits(ctx, key,bucket.ID)
-		if err:=nil{
+		objectExistsParams := database.ObjectExsitsParams{}
+		objectExistsParams.ObjectKey = key
+		objectExistsParams.BucketID = bucket.ID
+		objectExists, err := queries.ObjectExsits(ctx, objectExistsParams)
+		if err != nil {
 			http.Error(w, "object key validation faild", http.StatusBadRequest)
 			return
 		}
-		if(objectExists){
+		if objectExists {
 			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
 			return
 		}
 
-
-
 		// 5	parse object stream and receive file	Read binary data from r.Body
-		if err := r.ParseMultipartForm(50<<20); err!=nil{
+		if err := r.ParseMultipartForm(50 << 20); err != nil {
 			http.Error(w, "object parsing from req failed", http.StatusBadRequest)
 			return
 		}
 
-		file, header, err := r.FormFile("file")
-		if err!=nil{
+		file, _, err := r.FormFile("file")
+		if err != nil {
 			log.Fatal("Error while geting file from req :", err)
 			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
 
-
 		// 6	create directories	and create nested directories if required
-		dst := filepath.Join(bucketsDir,bucketName, key)
+		dst := filepath.Join(bucketsDir, bucketName, key)
 
-		dstDir:= filepath.Dir(dst)
+		dstDir := filepath.Dir(dst)
 
-		if err := os.MkdirAll(dir,0775); err!=nil{
+		if err := os.MkdirAll(dstDir, 0775); err != nil {
 			http.Error(w, "failed to create dir", http.StatusInternalServerError)
 			return
 		}
-
 
 		// Create destination file
 		dstFile, err := os.Create(dst)
@@ -155,27 +154,27 @@ func main() {
 		defer dstFile.Close()
 
 		// save file data to dst
-		if bytes_size, err := io.Copy(dstFile, file); err != nil {
+		bytes_size, err := io.Copy(dstFile, file)
+		if err != nil {
 			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
 			return
 		}
 
 		params.SizeBytes = bytes_size
 
-		created_object, err := queries.CreateObject(ctx,params)
+		created_object, err := queries.CreateObject(ctx, params)
 
 		if err != nil {
 			os.Remove(dst)
-			http.Error(w,"failed to save file to db", http.StatusInternalServerError)
+			http.Error(w, "failed to save file to db", http.StatusInternalServerError)
 		}
-
 
 		// return final
 		w.WriteHeader(http.StatusOK)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"message" : "Object uploaded Successfully",
-			"object" : created_object
+			"message": "Object uploaded Successfully",
+			"object":  created_object,
 		})
 
 	})
