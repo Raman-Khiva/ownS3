@@ -1,4 +1,4 @@
-.PHONY: migrate-up migrate-down postgres generate-sqlc go-get
+.PHONY: migrate-up migrate-down postgres generate-sqlc go-get compose-up compose-logs
 
 # --- Migrations ----
 
@@ -25,3 +25,11 @@ generate-sqlc:
 # ----- golang (go)--------
 go-get:
 	docker compose exec api go get "$(pkg)"
+
+
+# ------- docker compose ---------
+compose-up:
+	docker compose up
+
+compose-logs:
+	docker compose logs -f "$(s)

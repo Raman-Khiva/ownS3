@@ -49,6 +49,43 @@ func (q *Queries) CreateObject(ctx context.Context, arg CreateObjectParams) (Obj
 	return i, err
 }
 
+const getObjectsByBucket = `-- name: GetObjectsByBucket :many
+SELECT id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at FROM objects WHERE bucket_id=$1
+`
+
+func (q *Queries) GetObjectsByBucket(ctx context.Context, bucketID pgtype.UUID) ([]Object, error) {
+	rows, err := q.db.Query(ctx, getObjectsByBucket, bucketID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Object
+	for rows.Next() {
+		var i Object
+		if err := rows.Scan(
+			&i.ID,
+			&i.BucketID,
+			&i.ObjectKey,
+			&i.StorageKey,
+			&i.SizeBytes,
+			&i.Etag,
+			&i.ContentType,
+			&i.ChecksumAlgorithm,
+			&i.ChecksumValue,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const objectExsits = `-- name: ObjectExsits :one
 SELECT EXISTS (SELECT 1 FROM objects WHERE object_key=$1 AND bucket_id=$2)
 `

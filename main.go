@@ -55,9 +55,9 @@ func main() {
 	}
 
 	// get ping route
-	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "pong")
-	})
+	// mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+	// 	fmt.Fprint(w, "pong")
+	// })
 
 	//object routes
 
@@ -197,14 +197,61 @@ func main() {
 
 	// bucket routes
 
-	// head bucket route
-	// mux.HandleFunc("HEAD /{bucket}", func(w http.ResponseWriter, r *http.Request) {
+	//head bucket route
+	mux.HandleFunc("HEAD /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
-	// 	fmt.Print("head objects route called")
-	// })
-	// get objects in bucket
+		ctx := r.Context()
 
+		bucketName := r.PathValue("bucket")
+
+		// head bucket db query
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "Bucket Does Not Exist", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "Failed to fetch bucket from DB", http.StatusInternalServerError)
+			return
+		}
+
+		log.Println("Bucket found successfully")
+		log.Println(bucket)
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	//get objects in bucket
 	mux.HandleFunc("GET /{bucket}", func(w http.ResponseWriter, r *http.Request) {
+
+		log.Println("List Objects in Bucket called")
+		ctx := r.Context()
+		bucketName := r.PathValue("bucket")
+
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "Bucket does not exist", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "Failed while finding bucket from db", http.StatusInternalServerError)
+			return
+		}
+
+		objects, err := queries.GetObjectsByBucket(ctx, bucket.ID)
+
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Failed while fetching objects from db", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"Objects": objects,
+		})
 
 	})
 
