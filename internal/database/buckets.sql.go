@@ -7,6 +7,8 @@ package database
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createBucket = `-- name: CreateBucket :one
@@ -54,4 +56,35 @@ func (q *Queries) GetBucketByName(ctx context.Context, name string) (Bucket, err
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getBuckets = `-- name: GetBuckets :many
+SELECT name, created_at
+FROM buckets
+ORDER BY name
+`
+
+type GetBucketsRow struct {
+	Name      string
+	CreatedAt pgtype.Timestamptz
+}
+
+func (q *Queries) GetBuckets(ctx context.Context) ([]GetBucketsRow, error) {
+	rows, err := q.db.Query(ctx, getBuckets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetBucketsRow
+	for rows.Next() {
+		var i GetBucketsRow
+		if err := rows.Scan(&i.Name, &i.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

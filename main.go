@@ -210,7 +210,21 @@ func main() {
 
 	//get buckets list routes
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 
+		// get buckets db query
+		buckets, err := queries.GetBuckets(ctx)
+
+		if err != nil {
+			http.Error(w, "Fetching buckets from db failed", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"Buckets": buckets,
+		})
 	})
 
 	// put bucket route

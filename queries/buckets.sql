@@ -9,3 +9,8 @@ RETURNING *;
 
 -- name: GetBucketByName :one
 SELECT * FROM buckets WHERE name=$1;
+
+-- name: GetBuckets :many
+SELECT name, created_at
+FROM buckets
+ORDER BY name;
