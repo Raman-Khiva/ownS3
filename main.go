@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"main/internal/database"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -225,7 +226,9 @@ func main() {
 		}
 		defer file.Close()
 
-		w.Header().Set("Content-Type", "application/octet-stream")
+		contentType := mime.TypeByExtension(filepath.Ext(key))
+
+		w.Header().Set("Content-Type", contentType)
 
 		_, err = io.Copy(w, file)
 

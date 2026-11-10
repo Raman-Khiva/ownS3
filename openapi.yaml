@@ -1,0 +1,633 @@
+openapi: 3.1.0
+
+info:
+  title: OwnS3 API
+  version: 0.1.0
+  summary: Self-hosted S3-compatible object storage API
+  description: |
+    HTTP API contract for the first OwnS3 release.
+
+    OwnS3 exposes a subset of the Amazon S3 REST API using path-style
+    bucket addressing. Control-plane listing responses and S3 errors use
+    XML. GetObject returns the stored object bytes. HEAD and delete
+    operations return empty response bodies.
+
+    Compatibility scope:
+      - The operations documented here are the initial OwnS3 target.
+      - AWS Signature Version 4 authentication, multipart uploads,
+        object versioning, ACLs, range requests, encryption, and the full
+        S3 feature set are not specified as implemented by this contract.
+      - The object-key route is greedy in the Go router: it captures all
+        path segments after the bucket. OpenAPI has no standard greedy
+        path-template syntax, so x-router-pattern documents the actual
+        Go ServeMux route. Clients must preserve slashes in object keys.
+
+servers:
+  - url: http://localhost:9000
+    description: Local OwnS3 development server
+
+tags:
+  - name: Service
+    description: Service-level operations
+  - name: Buckets
+    description: Bucket lifecycle and bucket listing operations
+  - name: Objects
+    description: Object upload, download, metadata, deletion, and listing
+
+paths:
+  /:
+    get:
+      tags: [Buckets]
+      operationId: listBuckets
+      summary: List buckets
+      description: Returns the buckets owned by the current OwnS3 identity.
+      responses:
+        '200':
+          description: Bucket listing returned successfully.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/ListAllMyBucketsResult'
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Owner>
+                    <ID>owns3-owner</ID>
+                    <DisplayName>OwnS3</DisplayName>
+                  </Owner>
+                  <Buckets>
+                    <Bucket>
+                      <Name>images</Name>
+                      <CreationDate>2026-11-10T10:00:00.000Z</CreationDate>
+                    </Bucket>
+                  </Buckets>
+                </ListAllMyBucketsResult>
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ping:
+    get:
+      tags: [Service]
+      operationId: healthCheck
+      summary: Health check
+      description: Simple process health endpoint. This is an OwnS3 extension, not an S3 API operation.
+      responses:
+        '200':
+          description: Service is responding.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: pong
+
+  /{bucket}:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+    put:
+      tags: [Buckets]
+      operationId: createBucket
+      summary: Create bucket
+      description: Creates a bucket. The initial implementation uses path-style addressing.
+      responses:
+        '200':
+          description: Bucket created successfully. The response body is empty.
+          headers:
+            Location:
+              description: Path of the created bucket.
+              schema:
+                type: string
+                example: /images
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '400':
+          $ref: '#/components/responses/InvalidBucketName'
+        '409':
+          description: Bucket name conflicts with an existing bucket or the bucket cannot be created.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/S3Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    head:
+      tags: [Buckets]
+      operationId: headBucket
+      summary: Check whether a bucket exists
+      description: Returns headers only. A HEAD response has no response body.
+      responses:
+        '200':
+          description: Bucket exists.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '404':
+          description: Bucket does not exist. The response body is empty for HEAD compatibility.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '500':
+          description: Internal server error. The response body is empty for HEAD compatibility.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+
+    get:
+      tags: [Objects]
+      operationId: listObjectsV2
+      summary: List objects in a bucket
+      description: |
+        Lists objects using the S3 ListObjectsV2 query interface.
+        This operation is selected by GET on a bucket path with list-type=2.
+      parameters:
+        - name: list-type
+          in: query
+          required: true
+          description: Must be 2 to select ListObjectsV2.
+          schema:
+            type: string
+            const: '2'
+        - name: prefix
+          in: query
+          required: false
+          description: Restricts results to keys beginning with this prefix.
+          schema:
+            type: string
+        - name: delimiter
+          in: query
+          required: false
+          description: Groups keys by a delimiter and returns CommonPrefixes.
+          schema:
+            type: string
+        - name: max-keys
+          in: query
+          required: false
+          description: Maximum number of keys to return. Defaults to 1000; maximum is 1000 for the initial contract.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1000
+            default: 1000
+        - name: continuation-token
+          in: query
+          required: false
+          description: Token returned by a previous truncated ListObjectsV2 response.
+          schema:
+            type: string
+        - name: start-after
+          in: query
+          required: false
+          description: Lexicographical key from which listing should start.
+          schema:
+            type: string
+        - name: encoding-type
+          in: query
+          required: false
+          description: Encoding applied to key-related response values.
+          schema:
+            type: string
+            enum: [url]
+      responses:
+        '200':
+          description: Object listing returned successfully.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/ListBucketResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NoSuchBucket'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags: [Buckets]
+      operationId: deleteBucket
+      summary: Delete bucket
+      description: Deletes an empty bucket. A non-empty bucket must not be deleted.
+      responses:
+        '204':
+          description: Bucket deleted successfully. Empty response body.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '404':
+          $ref: '#/components/responses/NoSuchBucket'
+        '409':
+          description: Bucket is not empty.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/S3Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /{bucket}/{key}:
+    x-router-pattern: '("/{bucket}/{key...}" in Go net/http ServeMux)'
+    description: |
+      Object route. The actual Go route uses a trailing multi-segment wildcard
+      and captures the entire remaining path as the object key, including `/`.
+      OpenAPI path templates do not standardize greedy path parameters. The
+      `{key}` parameter below describes the logical complete object key.
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+      - name: key
+        in: path
+        required: true
+        description: |
+          Complete object key, including any nested slash-separated segments.
+          For example, profile/photos/avatar.png. Preserve the key's slash
+          separators when constructing the request path.
+        schema:
+          type: string
+          minLength: 1
+    put:
+      tags: [Objects]
+      operationId: putObject
+      summary: Upload an object
+      description: |
+        Stores the request body as an object. Uploading an existing key replaces
+        that object's contents and metadata in the initial unversioned model.
+        The request body is streamed; clients do not have to send Content-Length
+        when using a supported transfer framing.
+      parameters:
+        - name: Content-Type
+          in: header
+          required: false
+          description: MIME type of the object. Defaults to application/octet-stream when absent.
+          schema:
+            type: string
+            example: image/png
+        - name: Content-MD5
+          in: header
+          required: false
+          description: Optional base64-encoded MD5 digest for request integrity validation.
+          schema:
+            type: string
+        - name: x-amz-meta-*
+          in: header
+          required: false
+          description: User metadata headers. OpenAPI cannot express arbitrary header names with this parameter; this entry documents the x-amz-meta- prefix convention.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: Raw object bytes. Do not JSON-encode or base64-wrap the object.
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          image/*:
+            schema:
+              type: string
+              format: binary
+          application/pdf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Object uploaded successfully. Response body is empty.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '400':
+          description: Invalid request or supplied checksum does not match.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/S3Error'
+        '404':
+          $ref: '#/components/responses/NoSuchBucket'
+        '413':
+          description: Request body exceeds the configured maximum object size.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/S3Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Objects]
+      operationId: getObject
+      summary: Download an object
+      description: Returns the raw object bytes, not an XML or JSON envelope.
+      responses:
+        '200':
+          description: Object retrieved successfully.
+          headers:
+            Content-Type:
+              description: Stored object MIME type, or application/octet-stream if unknown.
+              schema:
+                type: string
+            Content-Length:
+              description: Object size in bytes.
+              schema:
+                type: integer
+                minimum: 0
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            image/*:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Bucket or object does not exist.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/S3Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    head:
+      tags: [Objects]
+      operationId: headObject
+      summary: Retrieve object metadata
+      description: Returns object metadata headers only. The response body is empty.
+      responses:
+        '200':
+          description: Object metadata retrieved successfully.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+                minimum: 0
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '404':
+          description: Bucket or object does not exist. Empty response body.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '500':
+          description: Internal server error. Empty response body.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+
+    delete:
+      tags: [Objects]
+      operationId: deleteObject
+      summary: Delete an object
+      description: Deletes an object and its metadata. In the initial unversioned model, deleting a missing key is also successful.
+      responses:
+        '204':
+          description: Object deleted or did not exist. Empty response body.
+          headers:
+            x-amz-request-id:
+              $ref: '#/components/headers/RequestId'
+        '404':
+          $ref: '#/components/responses/NoSuchBucket'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    Bucket:
+      name: bucket
+      in: path
+      required: true
+      description: Bucket name.
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 63
+        pattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
+      example: images
+
+  headers:
+    RequestId:
+      description: Unique identifier for this request, also included in S3 XML errors.
+      schema:
+        type: string
+        example: req-01JXYZABC123
+    ETag:
+      description: Entity tag for the object. Treat as an opaque quoted value; it is not guaranteed to be an MD5 digest for every S3 upload mode.
+      schema:
+        type: string
+        example: '"d41d8cd98f00b204e9800998ecf8427e"'
+    LastModified:
+      description: Object modification time in HTTP-date format.
+      schema:
+        type: string
+        example: Tue, 10 Nov 2026 10:15:00 GMT
+
+  responses:
+    InvalidBucketName:
+      description: Bucket name is invalid.
+      content:
+        application/xml:
+          schema:
+            $ref: '#/components/schemas/S3Error'
+          example:
+            Code: InvalidBucketName
+            Message: The specified bucket is not valid.
+            Resource: /bad_bucket
+            RequestId: req-123
+    InvalidRequest:
+      description: Request parameters or request structure are invalid.
+      content:
+        application/xml:
+          schema:
+            $ref: '#/components/schemas/S3Error'
+    NoSuchBucket:
+      description: The requested bucket does not exist.
+      content:
+        application/xml:
+          schema:
+            $ref: '#/components/schemas/S3Error'
+          example:
+            Code: NoSuchBucket
+            Message: The specified bucket does not exist.
+            Resource: /missing-bucket
+            RequestId: req-123
+    InternalError:
+      description: Unexpected internal error. Do not expose SQL errors, filesystem paths, or stack traces.
+      content:
+        application/xml:
+          schema:
+            $ref: '#/components/schemas/S3Error'
+
+  schemas:
+    S3Error:
+      type: object
+      description: Standard S3 REST XML error document.
+      xml:
+        name: Error
+      required: [Code, Message, RequestId]
+      properties:
+        Code:
+          type: string
+          description: Machine-readable S3 error code.
+        Message:
+          type: string
+          description: Safe human-readable error message.
+        Resource:
+          type: string
+          description: Requested resource path.
+        RequestId:
+          type: string
+          description: Request identifier matching the x-amz-request-id response header.
+
+    Owner:
+      type: object
+      xml:
+        name: Owner
+      required: [ID]
+      properties:
+        ID:
+          type: string
+        DisplayName:
+          type: string
+
+    Bucket:
+      type: object
+      xml:
+        name: Bucket
+      required: [Name, CreationDate]
+      properties:
+        Name:
+          type: string
+        CreationDate:
+          type: string
+          format: date-time
+
+    ListAllMyBucketsResult:
+      type: object
+      xml:
+        name: ListAllMyBucketsResult
+        namespace: 'http://s3.amazonaws.com/doc/2006-03-01/'
+      required: [Owner, Buckets]
+      properties:
+        Owner:
+          $ref: '#/components/schemas/Owner'
+        Buckets:
+          type: object
+          xml:
+            name: Buckets
+          properties:
+            Bucket:
+              type: array
+              items:
+                $ref: '#/components/schemas/Bucket'
+
+    ObjectEntry:
+      type: object
+      xml:
+        name: Contents
+      required: [Key, LastModified, ETag, Size, StorageClass]
+      properties:
+        Key:
+          type: string
+        LastModified:
+          type: string
+          format: date-time
+        ETag:
+          type: string
+        Size:
+          type: integer
+          format: int64
+          minimum: 0
+        StorageClass:
+          type: string
+          enum: [STANDARD]
+
+    CommonPrefix:
+      type: object
+      xml:
+        name: CommonPrefixes
+      required: [Prefix]
+      properties:
+        Prefix:
+          type: string
+
+    ListBucketResult:
+      type: object
+      xml:
+        name: ListBucketResult
+        namespace: 'http://s3.amazonaws.com/doc/2006-03-01/'
+      required: [Name, Prefix, KeyCount, MaxKeys, IsTruncated]
+      properties:
+        Name:
+          type: string
+        Prefix:
+          type: string
+        Delimiter:
+          type: string
+        KeyCount:
+          type: integer
+          minimum: 0
+        MaxKeys:
+          type: integer
+          minimum: 0
+        IsTruncated:
+          type: boolean
+        ContinuationToken:
+          type: string
+        NextContinuationToken:
+          type: string
+        StartAfter:
+          type: string
+        EncodingType:
+          type: string
+        Contents:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObjectEntry'
+        CommonPrefixes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommonPrefix'
+
+x-owns3-implementation-notes:
+  request-routing:
+    health: 'GET /ping'
+    list-buckets: 'GET /'
+    bucket: '/{bucket}'
+    object: 'Go ServeMux pattern /{bucket}/{key...}; key captures nested path segments'
+  response-rules:
+    - Return S3 XML for control-plane listing responses and normal S3 errors.
+    - Return raw bytes for GetObject.
+    - Return no body for HEAD, DeleteBucket, DeleteObject, and successful PutObject.
+    - Return an ETag on successful PutObject and GetObject.
+    - Generate one request ID per request and reuse it in x-amz-request-id and XML errors.
+  not-yet-specified:
+    - AWS Signature Version 4 authentication and authorization
+    - Multipart upload operations
+    - Object versioning
+    - ACLs and bucket policies
+    - Range and conditional requests
+    - Server-side encryption
+    - Presigned URLs
