@@ -81,10 +81,16 @@ func main() {
 
 		ctx := r.Context()
 
+		// params object
+
+		params := database.CreateObjectParams{}
+
 		// 	Extract bucket name and key from URL
 		bucketName := r.PathValue("bucket")
 		key := r.PathValue("key")
 
+		params.ObjectKey = key
+		params.StorageKey = key
 
 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
 		bucket, err := queries.GetBucketByName(ctx,bucketName)
@@ -98,6 +104,7 @@ func main() {
 				return
 			}
 		}
+		params.BucketID = bucket.Id
 
 
 		// 4	Validate object key	Ensure the object key is valid and safe
@@ -110,6 +117,8 @@ func main() {
 			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
 			return
 		}
+
+
 
 		// 5	parse object stream and receive file	Read binary data from r.Body
 		if err := r.ParseMultipartForm(50<<20); err!=nil{
@@ -146,13 +155,28 @@ func main() {
 		defer dstFile.Close()
 
 		// save file data to dst
-		if _, err := io.Copy(dstFile, file); err != nil {
+		if bytes_size, err := io.Copy(dstFile, file); err != nil {
 			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
 			return
 		}
 
+		params.SizeBytes = bytes_size
+
+		created_object, err := queries.CreateObject(ctx,params)
+
+		if err != nil {
+			os.Remove(dst)
+			http.Error(w,"failed to save file to db", http.StatusInternalServerError)
+		}
+
+
 		// return final
-		fmt.Fprint(w, "Saved %s (%d bytes)", header.Filename, header.Size)
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"message" : "Object uploaded Successfully",
+			"object" : created_object
+		})
 
 	})
 
