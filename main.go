@@ -181,18 +181,156 @@ func main() {
 
 	// get object route i.e. download object
 	mux.HandleFunc("GET /{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Print("get object route called")
+
+		ctx := r.Context()
+
+		params := database.GetObjectByBucketAndKeyParams{}
+
+		bucketName := r.PathValue("bucket")
+		key := r.PathValue("key")
+
+		params.ObjectKey = key
+		// 3	Validate bucket	check whether bucket exists in PostgreSQL
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			return
+		}
+
+		params.BucketID = bucket.ID
+
+		_, err = queries.GetObjectByBucketAndKey(ctx, params)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "object does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
+			return
+		}
+
+		dst := filepath.Join(bucketsDir, bucketName, key)
+
+		file, err := os.Open(dst)
+
+		if err != nil {
+			http.Error(w, "Failed to get object from storage", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+
+		_, err = io.Copy(w, file)
+
+		if err != nil {
+			log.Printf("failed to send object %v ", err)
+			return
+		}
 
 	})
 
 	// head object route i.e. get metadata of object
 	mux.HandleFunc("HEAD /{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Print("head objects route called")
+		ctx := r.Context()
+
+		params := database.GetObjectByBucketAndKeyParams{}
+
+		bucketName := r.PathValue("bucket")
+		key := r.PathValue("key")
+
+		params.ObjectKey = key
+		// 3	Validate bucket	check whether bucket exists in PostgreSQL
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			return
+		}
+
+		params.BucketID = bucket.ID
+
+		_, err = queries.GetObjectByBucketAndKey(ctx, params)
+
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "object does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+
 	})
 
 	// delete object from a bucket route
 	mux.HandleFunc("DELETE /{bucket}/{key}", func(w http.ResponseWriter, r *http.Request) {
+		// ctx := r.Context()
 
+		// 		params := database.GetObjectByBucketAndKeyParams{}
+
+		// 		bucketName := r.PathValue("bucket")
+		// 		key := r.PathValue("key")
+
+		// 		params.ObjectKey = key
+
+		// 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
+		// 		bucket, err := queries.GetBucketByName(ctx, bucketName)
+
+		// 		switch {
+		// 			case errors.Is(err, sql.ErrNoRows):
+		// 				http.Error(w, "bucket does not exist", http.StatusNotFound)
+		// 				return
+		// 			case err != nil:
+		// 				http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+		// 				return
+		// 		}
+
+		// 		params.BucketID = bucket.ID
+
+		// 		object, err := queries.GetObjectByBucketAndKey(ctx,	params)
+		// 		switch {
+		// 					case errors.Is(err, sql.ErrNoRows):
+		// 						http.Error(w, "object does not exist", http.StatusNotFound)
+		// 						return
+		// 					case err != nil:
+		// 						http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
+		// 						return
+		// 				}
+
+		// 		var deleteParams database.DeleteObjectByBucketAndKeyParams
+
+		// 		deleteParams.BucketID = params.BucketID
+		// 		deleteParams.ObjectKey = params.ObjectKey
+
+		// 		if err := queries.DeleteObjectByBucketAndKey(ctx,deleteParams); err!=nil{
+		// 			http.Error(w,"Failed to delete object", http.StatusInternalServerError)
+		// 			return
+		// 		}
+
+		// 		dst := filepath.Join(bucketsDir, bucketName, key)
+
+		// 		file, err := os.Open(dst)
+
+		// 		if err!=nil {
+		// 			http.Error(w,"Failed to delete object from storage", http.StatusInternalServerError)
+		// 			return
+		// 		}
+
+		// 		w.WriteHeader(http.StatusOK)
+		// 		fmt.Fprint(w,"Object removed successfully")
 	})
 
 	// bucket routes

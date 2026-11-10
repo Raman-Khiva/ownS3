@@ -11,3 +11,12 @@ RETURNING *;
 
 -- name: GetObjectsByBucket :many
 SELECT * FROM objects WHERE bucket_id=$1;
+
+
+-- name: GetObjectByBucketAndKey :one
+SELECT * FROM objects
+WHERE bucket_id=$1 AND object_key=$2;
+
+-- name: DeleteObjectByBucketAndKey :exec
+DELETE FROM objects
+WHERE bucket_id=$1 AND object_key=$2;

@@ -49,6 +49,51 @@ func (q *Queries) CreateObject(ctx context.Context, arg CreateObjectParams) (Obj
 	return i, err
 }
 
+const deleteObjectByBucketAndKey = `-- name: DeleteObjectByBucketAndKey :exec
+DELETE FROM objects
+WHERE bucket_id=$1 AND object_key=$2
+`
+
+type DeleteObjectByBucketAndKeyParams struct {
+	BucketID  pgtype.UUID
+	ObjectKey string
+}
+
+func (q *Queries) DeleteObjectByBucketAndKey(ctx context.Context, arg DeleteObjectByBucketAndKeyParams) error {
+	_, err := q.db.Exec(ctx, deleteObjectByBucketAndKey, arg.BucketID, arg.ObjectKey)
+	return err
+}
+
+const getObjectByBucketAndKey = `-- name: GetObjectByBucketAndKey :one
+SELECT id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at FROM objects
+WHERE bucket_id=$1 AND object_key=$2
+`
+
+type GetObjectByBucketAndKeyParams struct {
+	BucketID  pgtype.UUID
+	ObjectKey string
+}
+
+func (q *Queries) GetObjectByBucketAndKey(ctx context.Context, arg GetObjectByBucketAndKeyParams) (Object, error) {
+	row := q.db.QueryRow(ctx, getObjectByBucketAndKey, arg.BucketID, arg.ObjectKey)
+	var i Object
+	err := row.Scan(
+		&i.ID,
+		&i.BucketID,
+		&i.ObjectKey,
+		&i.StorageKey,
+		&i.SizeBytes,
+		&i.Etag,
+		&i.ContentType,
+		&i.ChecksumAlgorithm,
+		&i.ChecksumValue,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getObjectsByBucket = `-- name: GetObjectsByBucket :many
 SELECT id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at FROM objects WHERE bucket_id=$1
 `
