@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
 	"main/internal/database"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,40 +58,95 @@ func main() {
 	})
 
 	//object routes
-	// put object in bucket route
-	mux.HandleFunc("PUT /upload", func(w http.ResponseWriter, r *http.Request) {
 
-		// bucketName := r.PathValue("bucket")
-		// object_key := r.PathValue("key")
+	// put object route requirements
+	// Functional requirements
+	// Your upload endpoint should handle these operations:
+	// #	Requirement	Description
+	// 1	Extract bucket	Get bucket name from URL
+	// 2	Extract key	Get complete object key, including nested paths
+	// 3	Validate bucket	Check whether bucket exists in PostgreSQL
+	// 4	Validate key	Ensure the object key is valid and safe
+	// 5	Receive file	Read binary data from r.Body
+	// 6	Create directories	Create nested directories if required
+	// 7	Store object	Write binary data to filesystem
+	// 8	Calculate size	Track the number of bytes uploaded
+	// 9	Calculate checksum	Calculate MD5 or another supported checksum
+	// 10	Save metadata	Insert/update object metadata in PostgreSQL
+	// 11	Handle overwrites	Replace an existing object with the same key
+	// 12	Return response	Return appropriate HTTP status and ETag
 
-		// parse file stream into file
-		if err := r.ParseMultipartForm(30 << 20); err != nil {
-			log.Fatal("error while parsing file", err)
-			http.Error(w, "error while parsing object", http.StatusBadRequest)
+	// put object route
+	mux.HandleFunc("PUT /{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
+
+		ctx := r.Context()
+
+		// 	Extract bucket name and key from URL
+		bucketName := r.PathValue("bucket")
+		key := r.PathValue("key")
+
+
+		// 3	Validate bucket	check whether bucket exists in PostgreSQL
+		bucket, err := queries.GetBucketByName(ctx,bucketName)
+
+		switch{
+			case errors.Is(err, sql.ErrNoRows):
+				http.Error(w,"bucket does not exist", http.StatusNotFound)
+				return
+			case err != nil{
+				http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+				return
+			}
+		}
+
+
+		// 4	Validate object key	Ensure the object key is valid and safe
+		objectExists, err := queries.ObjectExsits(ctx, key,bucket.ID)
+		if err:=nil{
+			http.Error(w, "object key validation faild", http.StatusBadRequest)
+			return
+		}
+		if(objectExists){
+			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
 			return
 		}
 
-		// get parsed file
+		// 5	parse object stream and receive file	Read binary data from r.Body
+		if err := r.ParseMultipartForm(50<<20); err!=nil{
+			http.Error(w, "object parsing from req failed", http.StatusBadRequest)
+			return
+		}
+
 		file, header, err := r.FormFile("file")
-		if err != nil {
+		if err!=nil{
 			log.Fatal("Error while geting file from req :", err)
 			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
 			return
 		}
-
 		defer file.Close()
 
+
+		// 6	create directories	and create nested directories if required
+		dst := filepath.Join(bucketsDir,bucketName, key)
+
+		dstDir:= filepath.Dir(dst)
+
+		if err := os.MkdirAll(dir,0775); err!=nil{
+			http.Error(w, "failed to create dir", http.StatusInternalServerError)
+			return
+		}
+
+
 		// Create destination file
-		dst, err := os.Create(header.Filename)
+		dstFile, err := os.Create(dst)
 		if err != nil {
 			http.Error(w, "error while creating destination", http.StatusInternalServerError)
 			return
 		}
-
-		defer dst.Close()
+		defer dstFile.Close()
 
 		// save file data to dst
-		if _, err := io.Copy(dst, file); err != nil {
+		if _, err := io.Copy(dstFile, file); err != nil {
 			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
 			return
 		}
