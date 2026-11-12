@@ -331,7 +331,7 @@ func main() {
 		o.UsePathStyle = true
 	})
 
-	bucket := "sdk-test-bucket-30"
+	bucket := "sdk-test-bucket-31"
 	key := "hello.txt"
 	content := "Hello from AWS SDK to ownS3!"
 	contentType := "text/plain"
