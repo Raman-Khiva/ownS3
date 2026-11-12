@@ -1,3 +1,17 @@
+// NoSuchBucket	404	Code, Message, BucketName, RequestId, HostId
+// NoSuchKey	404	Code, Message, Key, RequestId, HostId
+// BucketNotEmpty	409	Code, Message, BucketName, RequestId, HostId
+// InvalidArgument	400	Code, Message, ArgumentName, ArgumentValue, RequestId, HostId
+// EntityTooLarge	400	Code, Message, RequestId, HostId
+// BadDigest	400	Code, Message, ExpectedDigest, CalculatedDigest, RequestId, HostId
+// InvalidRange	416	Code, Message, RequestId, HostId
+// AccessDenied	403	Code, Message, RequestId, HostId
+// SignatureDoesNotMatch	403	Code, Message, AWSAccessKeyId, StringToSign, SignatureProvided, StringToSignBytes, RequestId, HostId
+// InvalidAccessKeyId	403	Code, Message, AWSAccessKeyId, RequestId, HostId
+// MethodNotAllowed	405	Code, Message, Method, Resource, RequestId, HostId
+// NotImplemented	501	Code, Message, RequestId, HostId
+// InternalError	500	Code, Message, RequestId, HostId
+
 package main
 
 import (
@@ -17,7 +31,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -56,7 +73,6 @@ func writeXML(w http.ResponseWriter, status int, v any) {
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
-	w.Header().Set("x-amz-request-id", requestID())
 	w.WriteHeader(status)
 	w.Write([]byte(xml.Header))
 	w.Write(body)
@@ -94,6 +110,36 @@ func internalError(w http.ResponseWriter, r *http.Request, err error) {
 		Code:    "InternalError",
 		Message: "We encountered an internal error. Please try again.",
 	})
+}
+
+// validate Bucket Name
+func validateBucketName(name string) string {
+	if len(name) < 3 || len(name) > 63 {
+		return "name must be 3-63 chars"
+	}
+	// only lowercase, digits, dots, hyphens
+	if !regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]*[a-z0-9]$`).MatchString(name) {
+		return ("invalid characters or start/end")
+	}
+	if strings.Contains(name, "..") {
+		return ("no adjacent periods")
+	}
+	if strings.HasPrefix(name, "xn--") ||
+		strings.HasPrefix(name, "sthree-") ||
+		strings.HasPrefix(name, "amzn-s3-demo-") {
+		return ("reserved prefix")
+	}
+	if strings.HasSuffix(name, "-s3alias") ||
+		strings.HasSuffix(name, "--ol-s3") ||
+		strings.HasSuffix(name, "--x-s3") ||
+		strings.HasSuffix(name, "--table-s3") {
+		return ("reserved suffix")
+	}
+	// check not IP-like (4 dot-separated numbers)
+	if regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`).MatchString(name) {
+		return ("cannot be IP format")
+	}
+	return ""
 }
 
 // main function
@@ -155,19 +201,21 @@ func main() {
 		// 	Extract bucket name and key from URL
 		bucketName := r.PathValue("bucket")
 		key := r.PathValue("key")
-		contentType := r.Header.Get("Content-Type")
+		headerContentType := r.Header.Get("Content-Type")
 
-		if contentType == "" {
-			contentType = "application/octet-stream"
+		if headerContentType == "" {
+			headerContentType = "application/octet-stream"
+		}
+
+		contentType := pgtype.Text{
+			String: headerContentType,
+			Valid:  true,
 		}
 
 		// set params
 		params.ObjectKey = key
 		params.StorageKey = bucketName + "/" + key
-		params.ContentType = pgtype.Text{
-			String: contentType,
-			Valid:  true,
-		}
+		params.ContentType = contentType
 
 		body := r.Body
 		defer body.Close()
@@ -178,11 +226,17 @@ func main() {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			log.Printf("bucket does not exist %v", err)
-			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			e := responses.Error{
+				Code:       responses.ErrNoSuchBucket,
+				Message:    "Bucket does not exist",
+				BucketName: bucketName,
+			}
+
+			writeError(w, http.StatusNotFound, e)
 			return
 		case err != nil:
 			log.Printf("bucket validation failed %v", err)
-			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			internalError(w, r, err)
 			return
 		}
 		params.BucketID = bucket.ID
@@ -191,17 +245,20 @@ func main() {
 		objectExistsParams := database.ObjectExsitsParams{}
 		objectExistsParams.ObjectKey = key
 		objectExistsParams.BucketID = bucket.ID
-		objectExists, err := queries.ObjectExsits(ctx, objectExistsParams)
-		if err != nil {
-			log.Printf("object key validation  failed %v", err)
-			http.Error(w, "object key validation faild", http.StatusBadRequest)
+
+		getObjectParams := database.GetObjectByBucketAndKeyParams{
+			BucketID:  bucket.ID,
+			ObjectKey: key,
+		}
+
+		object, err := queries.GetObjectByBucketAndKey(ctx, getObjectParams)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Internal server error , %v", err)
+			internalError(w, r, err)
 			return
 		}
-		if objectExists {
-			log.Printf("object key already exists  %v ", err)
-			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
-			return
-		}
+
+		objectExists := !errors.Is(err, sql.ErrNoRows)
 
 		// 5	parse object stream and receive file	Read binary data from r.Body
 		// if err := r.ParseMultipartForm(50 << 20); err != nil {
@@ -212,11 +269,6 @@ func main() {
 
 		// file, _, err := r.FormFile("file")
 
-		if err != nil {
-			log.Printf("Error while geting file from req %v", err)
-			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
-			return
-		}
 		// defer file.Close()
 
 		// 6	create directories	and create nested directories if required
@@ -226,7 +278,7 @@ func main() {
 
 		if err := os.MkdirAll(dstDir, 0775); err != nil {
 			log.Printf("Failed to create dir: %v", err)
-			http.Error(w, "failed to create dir", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
@@ -234,7 +286,7 @@ func main() {
 		dstObj, err := os.Create(dst)
 		if err != nil {
 			log.Printf("Error while creating destination %v", err)
-			http.Error(w, "error while creating destination", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
@@ -244,7 +296,7 @@ func main() {
 		bytes_size, err := io.Copy(dstObj, body)
 		if err != nil {
 			log.Printf("Error while saving the object %v", err)
-			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
@@ -252,17 +304,34 @@ func main() {
 
 		data, _ := io.ReadAll(r.Body)
 		etag := fmt.Sprintf("\"%x\"", md5.Sum(data))
+
 		params.Etag = pgtype.Text{
 			String: etag,
 			Valid:  true,
 		}
 
-		_, err = queries.CreateObject(ctx, params)
+		updateParams := database.UpdateObjectParams{
+			ID:          object.BucketID,
+			SizeBytes:   bytes_size,
+			ContentType: contentType,
+			Etag:        pgtype.Text{String: etag, Valid: true},
+		}
 
-		if err != nil {
-			os.Remove(dst)
-			log.Printf("Error while saving file to db %v", err)
-			http.Error(w, "failed to save file to db", http.StatusInternalServerError)
+		if objectExists {
+			_, err := queries.UpdateObject(ctx, updateParams)
+			if err != nil {
+				internalError(w, r, err)
+				return
+			}
+		} else {
+
+			_, err = queries.CreateObject(ctx, params)
+
+			if err != nil {
+				os.Remove(dst)
+				log.Printf("Error while saving file to db %v", err)
+				internalError(w, r, err)
+			}
 		}
 
 		// return final put object
@@ -289,10 +358,16 @@ func main() {
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			// missing bucket get object
+			e := responses.Error{
+				Code:       responses.ErrNoSuchBucket,
+				Message:    "Bucket does not exist",
+				BucketName: bucketName,
+			}
+			writeError(w, http.StatusNotFound, e)
 			return
 		case err != nil:
-			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			internalError(w, r, err)
 			return
 		}
 
@@ -302,10 +377,16 @@ func main() {
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			http.Error(w, "object does not exist", http.StatusNotFound)
+			// missing object
+			e := responses.Error{
+				Code:    responses.ErrNoSuchKey,
+				Message: "Key does not exist!",
+				Key:     key,
+			}
+			writeError(w, http.StatusNotFound, e)
 			return
 		case err != nil:
-			http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
+			internalError(w, r, err)
 			return
 		}
 
@@ -314,7 +395,7 @@ func main() {
 		file, err := os.Open(dst)
 
 		if err != nil {
-			http.Error(w, "Failed to get object from storage", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 		defer file.Close()
@@ -326,7 +407,7 @@ func main() {
 		w.Header().Set("ETag", object.Etag.String)
 		w.Header().Set("Last-Modified", object.UpdatedAt.Time.UTC().Format(http.TimeFormat))
 		w.Header().Set("Content-Length", strconv.FormatInt(object.SizeBytes, 10))
-		w.Header().Set("Accpet-Ranges", "bytes")
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		// Accept-Ranges: bytes, Content-Range (206 only), x-amz-meta-*
 
@@ -374,13 +455,12 @@ func main() {
 			return
 		}
 
+		// final response head object
 		w.Header().Set("Content-Type", object.ContentType.String)
 		w.Header().Set("ETag", object.Etag.String)
 		w.Header().Set("Last-Modified", object.UpdatedAt.Time.UTC().Format(http.TimeFormat))
 		w.Header().Set("Content-Length", strconv.FormatInt(object.SizeBytes, 10))
-		w.Header().Set("Accpet-Ranges", "bytes")
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 
 	})
@@ -466,7 +546,7 @@ func main() {
 
 		log.Println("Bucket found successfully")
 		log.Println(bucket)
-
+		w.Header().Set("x-amz-bucket-region", "us-east-1")
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -481,20 +561,27 @@ func main() {
 
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				http.Error(w, "Bucket does not exist", http.StatusNotFound)
+				e := responses.Error{
+					Code:       responses.ErrNoSuchBucket,
+					Message:    "bucket does not exist",
+					BucketName: bucketName,
+				}
+
+				writeError(w, http.StatusNotFound, e)
 				return
 			}
-			http.Error(w, "Failed while finding bucket from db", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
 		objects, err := queries.GetObjectsByBucket(ctx, bucket.ID)
 
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "Failed while fetching objects from db", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
+		// final response get objects
 		res := responses.ListBucketResult{
 			Name:        bucketName,
 			MaxKeys:     1000,
@@ -517,6 +604,10 @@ func main() {
 				},
 			)
 		}
+
+		sort.Slice(res.Contents, func(i, j int) bool {
+			return res.Contents[i].Key < res.Contents[j].Key
+		})
 
 		writeXML(w, http.StatusOK, res)
 	})
@@ -554,20 +645,40 @@ func main() {
 	// put bucket route
 	mux.HandleFunc("PUT /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 
-		bucketName := r.PathValue("bucket")
 		ctx := r.Context()
+		bucketName := r.PathValue("bucket")
+
+		message := validateBucketName(bucketName)
+
+		// InvalidBucketName	400	Code, Message, BucketName, RequestId, HostId
+		if message != "" {
+			e := responses.Error{
+				Code:       responses.ErrInvalidBucketName,
+				Message:    message,
+				BucketName: bucketName,
+			}
+			writeError(w, 400, e)
+			return
+		}
 
 		// Check whether bucket exists
 		exists, err := queries.ExistsBucketByName(ctx, bucketName)
 
 		if err != nil {
-			log.Printf("error checking bucket: %v", err)
-			http.Error(w, "Database error", http.StatusInternalServerError)
+			internalError(w, r, err)
 			return
 		}
 
+		// if bucket already exists
+		// BucketAlreadyExists	409	Code, Message, BucketName, RequestId, HostId
+		// BucketAlreadyOwnedByYou	409	Code, Message, BucketName, RequestId, HostId
 		if exists {
-			http.Error(w, "Bucket already exists", http.StatusConflict)
+			e := responses.Error{
+				Code:       responses.ErrBucketAlreadyOwnedByYou,
+				Message:    "Bucket already exsits owned by you.",
+				BucketName: bucketName,
+			}
+			writeError(w, 409, e)
 			return
 		}
 
@@ -620,7 +731,8 @@ func main() {
 
 		bucket, err := queries.GetBucketByName(ctx, bucketName)
 		if err != nil {
-			if errors.As(err, sql.ErrNoRows) {
+			// missing bucket delete bucket
+			if errors.Is(err, sql.ErrNoRows) {
 				e := responses.Error{
 					Code:       responses.ErrNoSuchBucket,
 					Message:    responses.ErrNoSuchBucket,
@@ -668,7 +780,18 @@ func main() {
 
 	})
 
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		e := responses.Error{
+			Code:    responses.ErrNotImplemented,
+			Message: "This route is not implemented",
+		}
+		writeError(w, http.StatusNotImplemented, e)
+
+	})
+
 	addr := ":9000"
+
+	//start server
 	log.Printf("Server listening on http://localhost%s", addr)
 	if err := http.ListenAndServe(addr, middleware.CORSMiddleware(loggingMiddleware(commonHeaders(mux)))); err != nil {
 		log.Fatal(err)

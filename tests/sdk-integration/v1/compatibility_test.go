@@ -61,6 +61,12 @@ func fail(t *testing.T, args ...any) {
 	t.Fatal(failLabel + fmt.Sprint(args...))
 }
 
+// Suite counters updated by colorTestResult; printed once in TestMain.
+var (
+	testsPassed atomic.Int64
+	testsFailed atomic.Int64
+)
+
 // colorTestResult turns the terminal green when a test or subtest passes so
 // the following go-test "--- PASS: ..." line is green too. Failed tests keep
 // the red assertion output above. TestMain clears the color before exit.
@@ -68,17 +74,35 @@ func colorTestResult(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
 		if t.Failed() {
+			testsFailed.Add(1)
 			fmt.Fprint(os.Stdout, colorReset)
 			return
 		}
+		testsPassed.Add(1)
 		// No reset: leave green active for the testing package's PASS line.
 		fmt.Fprintf(os.Stdout, "%s✓ PASS %s\n", colorGreenBold, t.Name())
 	})
 }
 
 func TestMain(m *testing.M) {
+	start := time.Now()
 	code := m.Run()
+	elapsed := time.Since(start).Round(time.Millisecond)
+
+	passed := testsPassed.Load()
+	failed := testsFailed.Load()
+	total := passed + failed
+
 	fmt.Fprint(os.Stdout, colorReset)
+	fmt.Println()
+	if failed == 0 {
+		fmt.Printf("%s── stats ──────────────────────────────────────────%s\n", colorGreenBold, colorReset)
+		fmt.Printf("%s  ✓ %d passed  ·  %d total  ·  %s%s\n", colorGreenBold, passed, total, elapsed, colorReset)
+	} else {
+		fmt.Printf("%s── stats ──────────────────────────────────────────%s\n", colorRedBold, colorReset)
+		fmt.Printf("%s  ✗ %d failed  ·  %d passed  ·  %d total  ·  %s%s\n",
+			colorRedBold, failed, passed, total, elapsed, colorReset)
+	}
 	os.Exit(code)
 }
 

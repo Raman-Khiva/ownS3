@@ -13,7 +13,7 @@ import (
 
 const createObject = `-- name: CreateObject :one
 INSERT INTO objects (bucket_id,object_key, storage_key, size_bytes, content_type, etag)
-VALUES ($1,$2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at
 `
 
@@ -149,4 +149,42 @@ func (q *Queries) ObjectExsits(ctx context.Context, arg ObjectExsitsParams) (boo
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const updateObject = `-- name: UpdateObject :one
+UPDATE objects SET size_bytes=$1 , content_type=$2, etag=$3
+WHERE id=$4
+RETURNING id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at
+`
+
+type UpdateObjectParams struct {
+	SizeBytes   int64
+	ContentType pgtype.Text
+	Etag        pgtype.Text
+	ID          pgtype.UUID
+}
+
+func (q *Queries) UpdateObject(ctx context.Context, arg UpdateObjectParams) (Object, error) {
+	row := q.db.QueryRow(ctx, updateObject,
+		arg.SizeBytes,
+		arg.ContentType,
+		arg.Etag,
+		arg.ID,
+	)
+	var i Object
+	err := row.Scan(
+		&i.ID,
+		&i.BucketID,
+		&i.ObjectKey,
+		&i.StorageKey,
+		&i.SizeBytes,
+		&i.Etag,
+		&i.ContentType,
+		&i.ChecksumAlgorithm,
+		&i.ChecksumValue,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
