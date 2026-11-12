@@ -69,6 +69,17 @@ func writeError(w http.ResponseWriter, status int, e responses.Error) {
 	writeXML(w, status, e)
 }
 
+// write common heards
+func commonHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("x-amz-request-id", requestID())
+		h.Set("x-amz-id-2", requestID())
+		h.Set("Server", "OwnS3")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // main function
 func main() {
 	mux := http.NewServeMux()
@@ -133,19 +144,19 @@ func main() {
 		defer body.Close()
 
 		params.ObjectKey = key
-		params.StorageKey = key
+		params.StorageKey = bucketName + "/" + key
 
 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
 		bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
+			log.Printf("bucket does not exist %v", err)
 			http.Error(w, "bucket does not exist", http.StatusNotFound)
-			log.Fatal("bucket does not exist %v", err)
 			return
 		case err != nil:
+			log.Printf("bucket validation failed %v", err)
 			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
-			log.Fatal("bucket validation failed %v", err)
 			return
 		}
 		params.BucketID = bucket.ID
@@ -156,13 +167,13 @@ func main() {
 		objectExistsParams.BucketID = bucket.ID
 		objectExists, err := queries.ObjectExsits(ctx, objectExistsParams)
 		if err != nil {
+			log.Printf("object key validation  failed %v", err)
 			http.Error(w, "object key validation faild", http.StatusBadRequest)
-			log.Fatal("object key validation  failed %v", err)
 			return
 		}
 		if objectExists {
+			log.Printf("object key already exists  %v ", err)
 			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
-			log.Fatal("object key already exists  %v ", err)
 			return
 		}
 
@@ -176,7 +187,7 @@ func main() {
 		// file, _, err := r.FormFile("file")
 
 		if err != nil {
-			log.Fatal("Error while geting file from req :", err)
+			log.Printf("Error while geting file from req %v", err)
 			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
 			return
 		}
@@ -188,16 +199,16 @@ func main() {
 		dstDir := filepath.Dir(dst)
 
 		if err := os.MkdirAll(dstDir, 0775); err != nil {
+			log.Printf("Failed to create dir: %v", err)
 			http.Error(w, "failed to create dir", http.StatusInternalServerError)
-			log.Fatal("Failed to create dir:", err)
 			return
 		}
 
 		// Create destination file
 		dstObj, err := os.Create(dst)
 		if err != nil {
+			log.Printf("Error while creating destination %v", err)
 			http.Error(w, "error while creating destination", http.StatusInternalServerError)
-			log.Fatal("Error while creating destination :", err)
 			return
 		}
 
@@ -206,6 +217,7 @@ func main() {
 		// save body data to dst
 		bytes_size, err := io.Copy(dstObj, body)
 		if err != nil {
+			log.Printf("Error while saving the object %v", err)
 			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
 			return
 		}
@@ -216,6 +228,7 @@ func main() {
 
 		if err != nil {
 			os.Remove(dst)
+			log.Printf("Error while saving file to db %v", err)
 			http.Error(w, "failed to save file to db", http.StatusInternalServerError)
 		}
 
@@ -512,7 +525,7 @@ func main() {
 		}
 
 		// Create bucket
-		createdBucket, err := queries.CreateBucket(ctx, bucketName)
+		_, err = queries.CreateBucket(ctx, bucketName)
 
 		if err != nil {
 			log.Printf("error creating bucket: %v", err)
@@ -520,11 +533,11 @@ func main() {
 			return
 		}
 
-		fmt.Fprintf(w,
-			"Bucket created successfully. Name: %s, ID: %v",
-			createdBucket.Name,
-			createdBucket.ID,
-		)
+		// final reponse put bucket
+
+		w.Header().Set("Location", "owns3:/"+bucketName)
+		w.WriteHeader(http.StatusOK)
+		return
 	})
 	// mux.HandleFunc("PUT /{bucket}", func(w http.ResponseWriter, r *http.Request) {
 	// 	// fetch bucketId from params
@@ -557,7 +570,7 @@ func main() {
 
 	addr := ":9000"
 	log.Printf("Server listening on http://localhost%s", addr)
-	if err := http.ListenAndServe(addr, middleware.CORSMiddleware(loggingMiddleware(mux))); err != nil {
+	if err := http.ListenAndServe(addr, middleware.CORSMiddleware(loggingMiddleware(commonHeaders(mux)))); err != nil {
 		log.Fatal(err)
 	}
 }
