@@ -12,16 +12,18 @@ import (
 )
 
 const createObject = `-- name: CreateObject :one
-INSERT INTO objects (bucket_id,object_key, storage_key, size_bytes)
-VALUES ($1,$2, $3, $4)
+INSERT INTO objects (bucket_id,object_key, storage_key, size_bytes, content_type, etag)
+VALUES ($1,$2, $3, $4, $5, $6)
 RETURNING id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at
 `
 
 type CreateObjectParams struct {
-	BucketID   pgtype.UUID
-	ObjectKey  string
-	StorageKey string
-	SizeBytes  int64
+	BucketID    pgtype.UUID
+	ObjectKey   string
+	StorageKey  string
+	SizeBytes   int64
+	ContentType pgtype.Text
+	Etag        pgtype.Text
 }
 
 func (q *Queries) CreateObject(ctx context.Context, arg CreateObjectParams) (Object, error) {
@@ -30,6 +32,8 @@ func (q *Queries) CreateObject(ctx context.Context, arg CreateObjectParams) (Obj
 		arg.ObjectKey,
 		arg.StorageKey,
 		arg.SizeBytes,
+		arg.ContentType,
+		arg.Etag,
 	)
 	var i Object
 	err := row.Scan(

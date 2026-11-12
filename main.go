@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -14,12 +14,13 @@ import (
 	"main/internal/database"
 	"main/internal/middleware"
 	"main/internal/responses"
-	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,8 +65,8 @@ func writeXML(w http.ResponseWriter, status int, v any) {
 // write error
 
 func writeError(w http.ResponseWriter, status int, e responses.Error) {
-	e.RequestID = requestID()
-	e.HostID = "host-id"
+	e.RequestID = w.Header().Get("x-amz-request-id")
+	e.HostID = w.Header().Get("x-amz-id-2")
 	writeXML(w, status, e)
 }
 
@@ -77,6 +78,21 @@ func commonHeaders(next http.Handler) http.Handler {
 		h.Set("x-amz-id-2", requestID())
 		h.Set("Server", "OwnS3")
 		next.ServeHTTP(w, r)
+	})
+}
+
+// internal server error fucntion
+func internalError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("request_id=%s %s %s: %v",
+		w.Header().Get("x-amz-request-id"), r.Method, r.URL.Path, err)
+
+	if r.Method == http.MethodHead {
+		w.WriteHeader(500) // HEAD: no body
+		return
+	}
+	writeError(w, 500, responses.Error{
+		Code:    "InternalError",
+		Message: "We encountered an internal error. Please try again.",
 	})
 }
 
@@ -139,12 +155,22 @@ func main() {
 		// 	Extract bucket name and key from URL
 		bucketName := r.PathValue("bucket")
 		key := r.PathValue("key")
+		contentType := r.Header.Get("Content-Type")
+
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+
+		// set params
+		params.ObjectKey = key
+		params.StorageKey = bucketName + "/" + key
+		params.ContentType = pgtype.Text{
+			String: contentType,
+			Valid:  true,
+		}
 
 		body := r.Body
 		defer body.Close()
-
-		params.ObjectKey = key
-		params.StorageKey = bucketName + "/" + key
 
 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
 		bucket, err := queries.GetBucketByName(ctx, bucketName)
@@ -224,7 +250,14 @@ func main() {
 
 		params.SizeBytes = bytes_size
 
-		created_object, err := queries.CreateObject(ctx, params)
+		data, _ := io.ReadAll(r.Body)
+		etag := fmt.Sprintf("\"%x\"", md5.Sum(data))
+		params.Etag = pgtype.Text{
+			String: etag,
+			Valid:  true,
+		}
+
+		_, err = queries.CreateObject(ctx, params)
 
 		if err != nil {
 			os.Remove(dst)
@@ -232,13 +265,10 @@ func main() {
 			http.Error(w, "failed to save file to db", http.StatusInternalServerError)
 		}
 
-		// return final
+		// return final put object
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusOK)
-
-		json.NewEncoder(w).Encode(map[string]any{
-			"message": "Object uploaded Successfully",
-			"object":  created_object,
-		})
 
 	})
 
@@ -268,7 +298,7 @@ func main() {
 
 		params.BucketID = bucket.ID
 
-		_, err = queries.GetObjectByBucketAndKey(ctx, params)
+		object, err := queries.GetObjectByBucketAndKey(ctx, params)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -289,9 +319,16 @@ func main() {
 		}
 		defer file.Close()
 
-		contentType := mime.TypeByExtension(filepath.Ext(key))
+		// contentType := mime.TypeByExtension(filepath.Ext(key))
 
-		w.Header().Set("Content-Type", contentType)
+		// final reponse get object
+		w.Header().Set("Content-Type", object.ContentType.String)
+		w.Header().Set("ETag", object.Etag.String)
+		w.Header().Set("Last-Modified", object.UpdatedAt.Time.UTC().Format(http.TimeFormat))
+		w.Header().Set("Content-Length", strconv.FormatInt(object.SizeBytes, 10))
+		w.Header().Set("Accpet-Ranges", "bytes")
+		w.WriteHeader(http.StatusOK)
+		// Accept-Ranges: bytes, Content-Range (206 only), x-amz-meta-*
 
 		_, err = io.Copy(w, file)
 
@@ -326,7 +363,7 @@ func main() {
 
 		params.BucketID = bucket.ID
 
-		_, err = queries.GetObjectByBucketAndKey(ctx, params)
+		object, err := queries.GetObjectByBucketAndKey(ctx, params)
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -337,66 +374,73 @@ func main() {
 			return
 		}
 
+		w.Header().Set("Content-Type", object.ContentType.String)
+		w.Header().Set("ETag", object.Etag.String)
+		w.Header().Set("Last-Modified", object.UpdatedAt.Time.UTC().Format(http.TimeFormat))
+		w.Header().Set("Content-Length", strconv.FormatInt(object.SizeBytes, 10))
+		w.Header().Set("Accpet-Ranges", "bytes")
+		w.WriteHeader(http.StatusOK)
+
 		w.WriteHeader(http.StatusOK)
 
 	})
 
 	// delete object from a bucket route
 	mux.HandleFunc("DELETE /{bucket}/{key}", func(w http.ResponseWriter, r *http.Request) {
-		// ctx := r.Context()
+		ctx := r.Context()
 
-		// 		params := database.GetObjectByBucketAndKeyParams{}
+		params := database.GetObjectByBucketAndKeyParams{}
 
-		// 		bucketName := r.PathValue("bucket")
-		// 		key := r.PathValue("key")
+		bucketName := r.PathValue("bucket")
+		key := r.PathValue("key")
 
-		// 		params.ObjectKey = key
+		params.ObjectKey = key
 
-		// 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
-		// 		bucket, err := queries.GetBucketByName(ctx, bucketName)
+		// 3	Validate bucket	check whether bucket exists in PostgreSQL
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
 
-		// 		switch {
-		// 			case errors.Is(err, sql.ErrNoRows):
-		// 				http.Error(w, "bucket does not exist", http.StatusNotFound)
-		// 				return
-		// 			case err != nil:
-		// 				http.Error(w, "bucket name validation failed", http.StatusBadRequest)
-		// 				return
-		// 		}
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			return
+		}
 
-		// 		params.BucketID = bucket.ID
+		params.BucketID = bucket.ID
 
-		// 		object, err := queries.GetObjectByBucketAndKey(ctx,	params)
-		// 		switch {
-		// 					case errors.Is(err, sql.ErrNoRows):
-		// 						http.Error(w, "object does not exist", http.StatusNotFound)
-		// 						return
-		// 					case err != nil:
-		// 						http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
-		// 						return
-		// 				}
+		_, err = queries.GetObjectByBucketAndKey(ctx, params)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			http.Error(w, "object does not exist", http.StatusNotFound)
+			return
+		case err != nil:
+			http.Error(w, "Failed while geting object from db", http.StatusBadRequest)
+			return
+		}
 
-		// 		var deleteParams database.DeleteObjectByBucketAndKeyParams
+		var deleteParams database.DeleteObjectByBucketAndKeyParams
 
-		// 		deleteParams.BucketID = params.BucketID
-		// 		deleteParams.ObjectKey = params.ObjectKey
+		deleteParams.BucketID = params.BucketID
+		deleteParams.ObjectKey = params.ObjectKey
 
-		// 		if err := queries.DeleteObjectByBucketAndKey(ctx,deleteParams); err!=nil{
-		// 			http.Error(w,"Failed to delete object", http.StatusInternalServerError)
-		// 			return
-		// 		}
+		if err := queries.DeleteObjectByBucketAndKey(ctx, deleteParams); err != nil {
+			http.Error(w, "Failed to delete object", http.StatusInternalServerError)
+			return
+		}
 
-		// 		dst := filepath.Join(bucketsDir, bucketName, key)
+		dst := filepath.Join(bucketsDir, bucketName, key)
 
-		// 		file, err := os.Open(dst)
+		if err := os.Remove(dst); err != nil {
+			http.Error(w, "Failed to delete object from storage", http.StatusInternalServerError)
+			return
+		}
 
-		// 		if err!=nil {
-		// 			http.Error(w,"Failed to delete object from storage", http.StatusInternalServerError)
-		// 			return
-		// 		}
+		// final response delete object
+		w.WriteHeader(http.StatusNoContent)
 
-		// 		w.WriteHeader(http.StatusOK)
-		// 		fmt.Fprint(w,"Object removed successfully")
+		//end
 	})
 
 	// bucket routes
@@ -452,21 +496,24 @@ func main() {
 		}
 
 		res := responses.ListBucketResult{
-			Name:         bucketName,
-			MaxKeys:      10,
-			KeyCount:     len(objects),
-			Prefix:       "prefix",
-			EncodingType: "encoding-type",
+			Name:        bucketName,
+			MaxKeys:     1000,
+			KeyCount:    min(len(objects), 1000),
+			Prefix:      "",
+			IsTruncated: len(objects) > 1000,
 		}
 
-		for _, object := range objects {
+		for i, object := range objects {
+			if i >= 1000 {
+				break
+			}
 			res.Contents = append(res.Contents,
 				responses.Object{
 					Key:          object.ObjectKey,
 					LastModified: object.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
-					ETag:         "e-tag",
-					Size:         2000,
-					StorageClass: "storage-class",
+					ETag:         object.Etag.String,
+					Size:         object.SizeBytes,
+					StorageClass: "STANDARD",
 				},
 			)
 		}
@@ -535,7 +582,7 @@ func main() {
 
 		// final reponse put bucket
 
-		w.Header().Set("Location", "owns3:/"+bucketName)
+		w.Header().Set("Location", "/"+bucketName)
 		w.WriteHeader(http.StatusOK)
 		return
 	})
@@ -565,6 +612,59 @@ func main() {
 
 	// delete bucket route
 	mux.HandleFunc("DELETE /{bucket}", func(w http.ResponseWriter, r *http.Request) {
+
+		ctx := r.Context()
+
+		// request params
+		bucketName := r.PathValue("bucket")
+
+		bucket, err := queries.GetBucketByName(ctx, bucketName)
+		if err != nil {
+			if errors.As(err, sql.ErrNoRows) {
+				e := responses.Error{
+					Code:       responses.ErrNoSuchBucket,
+					Message:    responses.ErrNoSuchBucket,
+					BucketName: bucketName,
+				}
+				writeError(w, http.StatusNotFound, e)
+				return
+			} else {
+				internalError(w, r, err)
+				return
+			}
+		}
+
+		isBucketEmtpy, err := queries.IsBucketEmpty(ctx, bucket.ID)
+
+		if err != nil {
+			internalError(w, r, err)
+			return
+		}
+
+		if !isBucketEmtpy {
+			e := responses.Error{
+				Code:       responses.ErrBucketNotEmpty,
+				Message:    "Can't delete a non empty bucket!",
+				BucketName: bucketName,
+			}
+
+			writeError(w, http.StatusConflict, e)
+			return
+		}
+
+		if err := queries.DeleteBucketByName(ctx, bucketName); err != nil {
+			internalError(w, r, err)
+			return
+		}
+
+		dest := filepath.Join(bucketsDir, bucketName)
+		if err = os.RemoveAll(dest); err != nil {
+			internalError(w, r, err)
+			return
+		}
+
+		// final response delete bucket
+		w.WriteHeader(204)
 
 	})
 

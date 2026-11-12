@@ -30,6 +30,15 @@ func (q *Queries) CreateBucket(ctx context.Context, name string) (Bucket, error)
 	return i, err
 }
 
+const deleteBucketByName = `-- name: DeleteBucketByName :exec
+DELETE FROM buckets Where name = $1
+`
+
+func (q *Queries) DeleteBucketByName(ctx context.Context, name string) error {
+	_, err := q.db.Exec(ctx, deleteBucketByName, name)
+	return err
+}
+
 const existsBucketByName = `-- name: ExistsBucketByName :one
 SELECT EXISTS (SELECT 1 FROM buckets WHERE name = $1)
 `
@@ -87,4 +96,15 @@ func (q *Queries) GetBuckets(ctx context.Context) ([]GetBucketsRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const isBucketEmpty = `-- name: IsBucketEmpty :one
+SELECT NOT EXISTS (SELECT 1 FROM objects WHERE bucket_id= $1)
+`
+
+func (q *Queries) IsBucketEmpty(ctx context.Context, bucketID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, isBucketEmpty, bucketID)
+	var not_exists bool
+	err := row.Scan(&not_exists)
+	return not_exists, err
 }
