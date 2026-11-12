@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"main/internal/database"
+	"main/internal/middleware"
+	"main/internal/responses"
 	"mime"
 	"net/http"
 	"os"
@@ -31,6 +36,38 @@ var buckets []string
 const bucketsDir = "./internal/storage/buckets"
 
 var database_url string = os.Getenv("DATABASE_URL")
+
+// request id function
+
+func requestID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// write xml (for reponse body)
+func writeXML(w http.ResponseWriter, status int, v any) {
+	body, err := xml.Marshal(v)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("x-amz-request-id", requestID())
+	w.WriteHeader(status)
+	w.Write([]byte(xml.Header))
+	w.Write(body)
+}
+
+// write error
+
+func writeError(w http.ResponseWriter, status int, e responses.Error) {
+	e.RequestID = requestID()
+	e.HostID = "host-id"
+	writeXML(w, status, e)
+}
 
 // main function
 func main() {
@@ -92,6 +129,9 @@ func main() {
 		bucketName := r.PathValue("bucket")
 		key := r.PathValue("key")
 
+		body := r.Body
+		defer body.Close()
+
 		params.ObjectKey = key
 		params.StorageKey = key
 
@@ -101,9 +141,11 @@ func main() {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			http.Error(w, "bucket does not exist", http.StatusNotFound)
+			log.Fatal("bucket does not exist %v", err)
 			return
 		case err != nil:
 			http.Error(w, "bucket name validation failed", http.StatusBadRequest)
+			log.Fatal("bucket validation failed %v", err)
 			return
 		}
 		params.BucketID = bucket.ID
@@ -115,26 +157,30 @@ func main() {
 		objectExists, err := queries.ObjectExsits(ctx, objectExistsParams)
 		if err != nil {
 			http.Error(w, "object key validation faild", http.StatusBadRequest)
+			log.Fatal("object key validation  failed %v", err)
 			return
 		}
 		if objectExists {
 			http.Error(w, "object already exists in the bucket", http.StatusBadRequest)
+			log.Fatal("object key already exists  %v ", err)
 			return
 		}
 
 		// 5	parse object stream and receive file	Read binary data from r.Body
-		if err := r.ParseMultipartForm(50 << 20); err != nil {
-			http.Error(w, "object parsing from req failed", http.StatusBadRequest)
-			return
-		}
+		// if err := r.ParseMultipartForm(50 << 20); err != nil {
+		// 	http.Error(w, "object parsing from req failed", http.StatusBadRequest)
+		// 	log.Fatal("object parsing from req failed  %v ", err)
+		// 	return
+		// }
 
-		file, _, err := r.FormFile("file")
+		// file, _, err := r.FormFile("file")
+
 		if err != nil {
 			log.Fatal("Error while geting file from req :", err)
 			http.Error(w, "errro while geting file from req", http.StatusBadRequest)
 			return
 		}
-		defer file.Close()
+		// defer file.Close()
 
 		// 6	create directories	and create nested directories if required
 		dst := filepath.Join(bucketsDir, bucketName, key)
@@ -143,19 +189,22 @@ func main() {
 
 		if err := os.MkdirAll(dstDir, 0775); err != nil {
 			http.Error(w, "failed to create dir", http.StatusInternalServerError)
+			log.Fatal("Failed to create dir:", err)
 			return
 		}
 
 		// Create destination file
-		dstFile, err := os.Create(dst)
+		dstObj, err := os.Create(dst)
 		if err != nil {
 			http.Error(w, "error while creating destination", http.StatusInternalServerError)
+			log.Fatal("Error while creating destination :", err)
 			return
 		}
-		defer dstFile.Close()
 
-		// save file data to dst
-		bytes_size, err := io.Copy(dstFile, file)
+		defer dstObj.Close()
+
+		// save body data to dst
+		bytes_size, err := io.Copy(dstObj, body)
 		if err != nil {
 			http.Error(w, "error while saving file to the dst", http.StatusInternalServerError)
 			return
@@ -191,6 +240,7 @@ func main() {
 		key := r.PathValue("key")
 
 		params.ObjectKey = key
+
 		// 3	Validate bucket	check whether bucket exists in PostgreSQL
 		bucket, err := queries.GetBucketByName(ctx, bucketName)
 
@@ -388,12 +438,27 @@ func main() {
 			return
 		}
 
-		w.WriteHeader(http.StatusOK)
+		res := responses.ListBucketResult{
+			Name:         bucketName,
+			MaxKeys:      10,
+			KeyCount:     len(objects),
+			Prefix:       "prefix",
+			EncodingType: "encoding-type",
+		}
 
-		json.NewEncoder(w).Encode(map[string]any{
-			"Objects": objects,
-		})
+		for _, object := range objects {
+			res.Contents = append(res.Contents,
+				responses.Object{
+					Key:          object.ObjectKey,
+					LastModified: object.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+					ETag:         "e-tag",
+					Size:         2000,
+					StorageClass: "storage-class",
+				},
+			)
+		}
 
+		writeXML(w, http.StatusOK, res)
 	})
 
 	//get buckets list routes
@@ -408,11 +473,22 @@ func main() {
 			return
 		}
 
-		w.WriteHeader(http.StatusOK)
+		res := responses.ListAllMyBucketsResult{
+			Owner: responses.Owner{
+				ID:          "owner-id",
+				DisplayName: "owner-display-name",
+			},
+		}
 
-		json.NewEncoder(w).Encode(map[string]any{
-			"Buckets": buckets,
-		})
+		for _, bucket := range buckets {
+			res.Buckets.Bucket = append(res.Buckets.Bucket, responses.Bucket{
+				Name:         bucket.Name,
+				CreationDate: bucket.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+			})
+		}
+
+		writeXML(w, http.StatusOK, res)
+
 	})
 
 	// put bucket route
@@ -481,7 +557,7 @@ func main() {
 
 	addr := ":9000"
 	log.Printf("Server listening on http://localhost%s", addr)
-	if err := http.ListenAndServe(addr, loggingMiddleware(mux)); err != nil {
+	if err := http.ListenAndServe(addr, middleware.CORSMiddleware(loggingMiddleware(mux))); err != nil {
 		log.Fatal(err)
 	}
 }
