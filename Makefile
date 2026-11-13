@@ -39,4 +39,4 @@ compose-logs:
 
 # -------- clean -----------
 clean-storage:
-	sudo rm -rf ./internal/storage && mkdir -p ./internal/storage
+	sudo rm -rf ./internal/storage/buckets && mkdir -p ./internal/storage/buckets

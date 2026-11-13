@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -121,6 +122,36 @@ func internalError(w http.ResponseWriter, r *http.Request, err error) {
 		Code:    "InternalError",
 		Message: "We encountered an internal error. Please try again.",
 	})
+}
+
+// validate object key
+func validateObjectKey(key string, w http.ResponseWriter) bool {
+
+	message := ""
+
+	if key == "" {
+		message = ("object key cannot be empty")
+	}
+
+	if !utf8.ValidString(key) {
+		message = ("object key must be valid UTF-8")
+	}
+
+	if len([]byte(key)) > 1024 {
+		message = ("object key exceeds 1024 bytes")
+	}
+
+	if message == "" {
+		return true
+	}
+
+	e := responses.Error{
+		Code:    "KeyTooLongError",
+		Message: message,
+	}
+
+	writeError(w, 400, e)
+	return false
 }
 
 // validate Bucket Name
@@ -211,6 +242,11 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 	// validate bucket name
 	valid := validateBucketName(bucketName, w)
 	// InvalidBucketName	400	Code, Message, BucketName, RequestId, HostId
+	if !valid {
+		return
+	}
+
+	valid = validateObjectKey(key, w)
 	if !valid {
 		return
 	}
@@ -381,6 +417,11 @@ func GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		return
 	}
+	valid = validateObjectKey(key, w)
+	if !valid {
+		return
+	}
+
 	params.ObjectKey = key
 
 	// 3	Validate bucket	check whether bucket exists in PostgreSQL
@@ -468,6 +509,11 @@ func HeadObjectHandler(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		return
 	}
+	valid = validateObjectKey(key, w)
+	if !valid {
+		return
+	}
+
 	params.ObjectKey = key
 	// 3	Validate bucket	check whether bucket exists in PostgreSQL
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
@@ -519,6 +565,11 @@ func DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		return
 	}
+	valid = validateObjectKey(key, w)
+	if !valid {
+		return
+	}
+
 	params.ObjectKey = key
 
 	// 3	Validate bucket	check whether bucket exists in PostgreSQL

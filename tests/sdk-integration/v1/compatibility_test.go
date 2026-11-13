@@ -1105,10 +1105,10 @@ func TestPutObject(t *testing.T) {
 		colorTestResult(t)
 		put(t, "no-type.bin", []byte("data"), "")
 		ex, out := h.head(t, bucket, "no-type.bin")
-		if got := ex.Header.Get("Content-Type"); got != "binary/octet-stream" {
-			failf(t, "default Content-Type %q, want binary/octet-stream", got)
+		if got := ex.Header.Get("Content-Type"); got != "application/octet-stream" {
+			failf(t, "default Content-Type %q, want application/octet-stream", got)
 		}
-		if aws.ToString(out.ContentType) != "binary/octet-stream" {
+		if aws.ToString(out.ContentType) != "application/octet-stream" {
 			failf(t, "SDK ContentType %q", aws.ToString(out.ContentType))
 		}
 	})
