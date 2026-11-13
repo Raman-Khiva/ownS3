@@ -1,0 +1,7 @@
+Hello from OwnS3 | http PUT :9000/my-bucket/documents/report.txt  Content-Type:text/plain
+
+
+
+
+
+echo Hello from OwnS3

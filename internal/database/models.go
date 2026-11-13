@@ -39,7 +39,7 @@ type Object struct {
 	ID                pgtype.UUID
 	BucketID          pgtype.UUID
 	ObjectKey         string
-	StorageKey        string
+	StorageKey        pgtype.UUID
 	SizeBytes         int64
 	Etag              pgtype.Text
 	ContentType       pgtype.Text

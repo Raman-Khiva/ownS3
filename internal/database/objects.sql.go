@@ -12,7 +12,7 @@ import (
 )
 
 const createObject = `-- name: CreateObject :one
-INSERT INTO objects (bucket_id,object_key, storage_key, size_bytes, content_type, etag)
+INSERT INTO objects (bucket_id, object_key, storage_key, size_bytes, content_type, etag)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at
 `
@@ -20,7 +20,7 @@ RETURNING id, bucket_id, object_key, storage_key, size_bytes, etag, content_type
 type CreateObjectParams struct {
 	BucketID    pgtype.UUID
 	ObjectKey   string
-	StorageKey  string
+	StorageKey  pgtype.UUID
 	SizeBytes   int64
 	ContentType pgtype.Text
 	Etag        pgtype.Text

@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -37,6 +36,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -200,7 +201,6 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// params object
-
 	params := database.CreateObjectParams{}
 
 	// 	Extract bucket name and key from URL
@@ -215,10 +215,12 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body := r.Body
+	defer body.Close()
+
 	if headerContentType == "" {
 		headerContentType = "application/octet-stream"
 	}
-
 	contentType := pgtype.Text{
 		String: headerContentType,
 		Valid:  true,
@@ -226,29 +228,23 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 
 	// set params
 	params.ObjectKey = key
-	params.StorageKey = bucketName + "/" + key
 	params.ContentType = contentType
-
-	body := r.Body
-	defer body.Close()
 
 	// 3	Validate bucket	check whether bucket exists in PostgreSQL
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
-	switch {
-
-	case errors.Is(err, sql.ErrNoRows):
-
-		log.Printf("bucket does not exist %v", err)
-		e := responses.Error{
-			Code:       responses.ErrNoSuchBucket,
-			Message:    "Bucket does not exist",
-			BucketName: bucketName,
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("bucket does not exist %v", err)
+			e := responses.Error{
+				Code:       responses.ErrNoSuchBucket,
+				Message:    "Bucket does not exist",
+				BucketName: bucketName,
+			}
+			writeError(w, http.StatusNotFound, e)
+			return
 		}
-		writeError(w, http.StatusNotFound, e)
-		return
 
-	case err != nil:
 		log.Printf("bucket validation failed %v", err)
 		internalError(w, r, err)
 		return
@@ -267,15 +263,22 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 	object, err := queries.GetObjectByBucketAndKey(ctx, getObjectParams)
 
 	if err != nil {
-
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			objectExists = false
 		} else {
 			log.Printf("Internal server error , %v", err)
 			internalError(w, r, err)
 			return
 		}
+	}
 
+	if objectExists {
+		params.StorageKey = object.StorageKey
+	} else {
+		params.StorageKey = pgtype.UUID{
+			Bytes: uuid.New(),
+			Valid: true,
+		}
 	}
 
 	// 5	parse object stream and receive file	Read binary data from r.Body
@@ -286,34 +289,36 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 	// }
 
 	// file, _, err := r.FormFile("file")
-
 	// defer file.Close()
 
 	// 6	create directories	and create nested directories if required
-	dst := filepath.Join(bucketsDir, bucketName, key)
+	fileName := params.StorageKey.String()
+	dirName := fileName[:2]
 
-	dstDir := filepath.Dir(dst)
+	dest := filepath.Join(bucketsDir, dirName, fileName)
 
-	if err := os.MkdirAll(dstDir, 0775); err != nil {
+	destDir := filepath.Dir(dest)
+
+	if err := os.MkdirAll(destDir, 0775); err != nil {
 		log.Printf("Failed to create dir: %v", err)
 		internalError(w, r, err)
 		return
 	}
 
 	// Create destination file
-	dstObj, err := os.Create(dst)
+	destObj, err := os.Create(dest)
 
 	if err != nil {
 		log.Printf("Error while creating destination %v", err)
 		internalError(w, r, err)
 		return
 	}
-	defer dstObj.Close()
+	defer destObj.Close()
 
 	hash := md5.New()
 
 	// save body data to dst
-	bytes_size, err := io.Copy(io.MultiWriter(dstObj, hash), body)
+	bytes_size, err := io.Copy(io.MultiWriter(destObj, hash), body)
 	if err != nil {
 		log.Printf("Error while saving the object %v", err)
 		internalError(w, r, err)
@@ -329,15 +334,13 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 		Valid:  true,
 	}
 
-	updateParams := database.UpdateObjectParams{
-		ID:          object.ID,
-		SizeBytes:   bytes_size,
-		ContentType: contentType,
-		Etag:        pgtype.Text{String: etag, Valid: true},
-	}
-
 	if objectExists {
-
+		updateParams := database.UpdateObjectParams{
+			ID:          object.ID,
+			SizeBytes:   params.SizeBytes,
+			ContentType: params.ContentType,
+			Etag:        params.Etag,
+		}
 		_, err := queries.UpdateObject(ctx, updateParams)
 		if err != nil {
 			internalError(w, r, err)
@@ -348,7 +351,7 @@ func PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 
 		_, err = queries.CreateObject(ctx, params)
 		if err != nil {
-			os.Remove(dst)
+			os.Remove(dest)
 			log.Printf("Error while saving file to db %v", err)
 			internalError(w, r, err)
 		}
@@ -384,7 +387,7 @@ func GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		// missing bucket get object
 		e := responses.Error{
 			Code:       responses.ErrNoSuchBucket,
@@ -403,7 +406,7 @@ func GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 	object, err := queries.GetObjectByBucketAndKey(ctx, params)
 
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		// missing object
 		e := responses.Error{
 			Code:    responses.ErrNoSuchKey,
@@ -417,7 +420,10 @@ func GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dst := filepath.Join(bucketsDir, bucketName, key)
+	fileName := object.StorageKey.String()
+	dirName := fileName[:2]
+
+	dst := filepath.Join(bucketsDir, dirName, fileName)
 
 	file, err := os.Open(dst)
 
@@ -467,7 +473,7 @@ func HeadObjectHandler(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		http.Error(w, "bucket does not exist", http.StatusNotFound)
 		return
 	case err != nil:
@@ -480,7 +486,7 @@ func HeadObjectHandler(w http.ResponseWriter, r *http.Request) {
 	object, err := queries.GetObjectByBucketAndKey(ctx, params)
 
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		http.Error(w, "object does not exist", http.StatusNotFound)
 		return
 	case err != nil:
@@ -519,7 +525,7 @@ func DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		e := responses.Error{
 			Code:       responses.ErrNoSuchBucket,
 			Message:    "Bucket does not exist",
@@ -535,9 +541,9 @@ func DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 
 	params.BucketID = bucket.ID
 
-	_, err = queries.GetObjectByBucketAndKey(ctx, params)
+	object, err := queries.GetObjectByBucketAndKey(ctx, params)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows):
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case err != nil:
@@ -555,7 +561,10 @@ func DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dst := filepath.Join(bucketsDir, bucketName, key)
+	fileName := object.StorageKey.String()
+	dirName := fileName[:2]
+
+	dst := filepath.Join(bucketsDir, dirName, fileName)
 
 	if err := os.Remove(dst); err != nil {
 		internalError(w, r, err)
@@ -587,7 +596,7 @@ func HeadBucketHanlder(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "Bucket Does Not Exist", http.StatusNotFound)
 			return
 		}
@@ -618,7 +627,7 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			e := responses.Error{
 				Code:       responses.ErrNoSuchBucket,
 				Message:    "bucket does not exist",
@@ -634,7 +643,7 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 
 	objects, err := queries.GetObjectsByBucket(ctx, bucket.ID)
 
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		internalError(w, r, err)
 		return
 	}
@@ -795,7 +804,7 @@ func DeleteBucketHandler(w http.ResponseWriter, r *http.Request) {
 	bucket, err := queries.GetBucketByName(ctx, bucketName)
 	if err != nil {
 		// missing bucket delete bucket
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			e := responses.Error{
 				Code:       responses.ErrNoSuchBucket,
 				Message:    responses.ErrNoSuchBucket,
