@@ -135,6 +135,48 @@ func (q *Queries) GetObjectsByBucket(ctx context.Context, bucketID pgtype.UUID) 
 	return items, nil
 }
 
+const getObjectsByBucketAndPrefix = `-- name: GetObjectsByBucketAndPrefix :many
+SELECT id, bucket_id, object_key, storage_key, size_bytes, etag, content_type, checksum_algorithm, checksum_value, metadata, created_at, updated_at FROM objects WHERE bucket_id=$1 AND object_key LIKE $2 || '%'
+`
+
+type GetObjectsByBucketAndPrefixParams struct {
+	BucketID pgtype.UUID
+	Column2  pgtype.Text
+}
+
+func (q *Queries) GetObjectsByBucketAndPrefix(ctx context.Context, arg GetObjectsByBucketAndPrefixParams) ([]Object, error) {
+	rows, err := q.db.Query(ctx, getObjectsByBucketAndPrefix, arg.BucketID, arg.Column2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Object
+	for rows.Next() {
+		var i Object
+		if err := rows.Scan(
+			&i.ID,
+			&i.BucketID,
+			&i.ObjectKey,
+			&i.StorageKey,
+			&i.SizeBytes,
+			&i.Etag,
+			&i.ContentType,
+			&i.ChecksumAlgorithm,
+			&i.ChecksumValue,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const objectExsits = `-- name: ObjectExsits :one
 SELECT EXISTS (SELECT 1 FROM objects WHERE object_key=$1 AND bucket_id=$2)
 `

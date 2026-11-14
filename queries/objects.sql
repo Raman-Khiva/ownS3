@@ -17,6 +17,8 @@ RETURNING *;
 -- name: GetObjectsByBucket :many
 SELECT * FROM objects WHERE bucket_id=$1;
 
+-- name: GetObjectsByBucketAndPrefix :many
+SELECT * FROM objects WHERE bucket_id=$1 AND object_key LIKE $2 || '%';
 
 -- name: GetObjectByBucketAndKey :one
 SELECT * FROM objects

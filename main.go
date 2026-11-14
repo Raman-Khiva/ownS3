@@ -665,9 +665,15 @@ func HeadBucketHanlder(w http.ResponseWriter, r *http.Request) {
 // mux.HandleFunc("GET /{bucket}",
 func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 
-	log.Println("List Objects in Bucket called")
+	// intialize context get objects
 	ctx := r.Context()
+
+	// extract pathvalues get objects
 	bucketName := r.PathValue("bucket")
+
+	// extract query params get objects
+	prefix := r.URL.Query().Get("prefix")
+	delimiter := r.URL.Query().Get("delimiter")
 
 	valid := validateBucketName(bucketName, w)
 
@@ -692,7 +698,15 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	objects, err := queries.GetObjectsByBucket(ctx, bucket.ID)
+	getObjectParams := database.GetObjectsByBucketAndPrefixParams{
+		BucketID: bucket.ID,
+		Column2: pgtype.Text{
+			String: prefix,
+			Valid:  true,
+		},
+	}
+
+	objects, err := queries.GetObjectsByBucketAndPrefix(ctx, getObjectParams)
 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		internalError(w, r, err)
@@ -703,25 +717,79 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 	res := responses.ListBucketResult{
 		Name:        bucketName,
 		MaxKeys:     1000,
-		KeyCount:    min(len(objects), 1000),
-		Prefix:      "",
+		Prefix:      prefix,
 		IsTruncated: len(objects) > 1000,
 	}
 
-	for i, object := range objects {
-		if i >= 1000 {
+	if delimiter != "" {
+		res.Delimiter = delimiter
+	}
+
+	commonPrefixes := make(map[string]bool)
+
+	len := 0
+	for _, object := range objects {
+		if len > 1000 {
 			break
 		}
-		res.Contents = append(res.Contents,
-			responses.Object{
-				Key:          object.ObjectKey,
-				LastModified: object.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
-				ETag:         object.Etag.String,
-				Size:         object.SizeBytes,
-				StorageClass: "STANDARD",
+
+		if delimiter == "" {
+			res.Contents = append(res.Contents,
+				responses.Object{
+					Key:          object.ObjectKey,
+					LastModified: object.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+					ETag:         object.Etag.String,
+					Size:         object.SizeBytes,
+					StorageClass: "STANDARD",
+				},
+			)
+
+		} else {
+			key := object.ObjectKey
+			after, ok := strings.CutPrefix(key, prefix)
+			if !ok {
+				continue
+			}
+			before, _, found := strings.Cut(after, delimiter)
+
+			if !found {
+				res.Contents = append(res.Contents,
+					responses.Object{
+						Key:          object.ObjectKey,
+						LastModified: object.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+						ETag:         object.Etag.String,
+						Size:         object.SizeBytes,
+						StorageClass: "STANDARD",
+					},
+				)
+			} else {
+				_, ok := commonPrefixes[before]
+				if ok {
+					len--
+				} else {
+					commonPrefixes[before] = true
+				}
+			}
+
+		}
+
+		len++
+	}
+
+	res.KeyCount = len
+
+	for k, _ := range commonPrefixes {
+		res.CommonPrefixes = append(res.CommonPrefixes,
+			responses.CommonPrefix{
+				Prefix: prefix + k + delimiter,
 			},
 		)
+
 	}
+
+	sort.Slice(res.CommonPrefixes, func(i, j int) bool {
+		return res.CommonPrefixes[i].Prefix < res.CommonPrefixes[j].Prefix
+	})
 
 	sort.Slice(res.Contents, func(i, j int) bool {
 		return res.Contents[i].Key < res.Contents[j].Key
