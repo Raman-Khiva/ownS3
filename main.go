@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -674,6 +675,14 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 	// extract query params get objects
 	prefix := r.URL.Query().Get("prefix")
 	delimiter := r.URL.Query().Get("delimiter")
+	continuationToken := r.URL.Query().Get("continuation-token")
+	_maxKeys := r.URL.Query().Get("max-keys")
+
+	if _maxKeys == "" {
+		_maxKeys = "1000"
+	}
+
+	maxKeys, _ := strconv.ParseInt(_maxKeys, 10, 32)
 
 	valid := validateBucketName(bucketName, w)
 
@@ -715,10 +724,18 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// final response get objects
 	res := responses.ListBucketResult{
-		Name:        bucketName,
-		MaxKeys:     1000,
-		Prefix:      prefix,
-		IsTruncated: len(objects) > 1000,
+		Name:              bucketName,
+		MaxKeys:           int(maxKeys),
+		Prefix:            prefix,
+		IsTruncated:       len(objects) > int(maxKeys),
+		ContinuationToken: continuationToken,
+	}
+
+	if res.IsTruncated {
+		b := make([]byte, 32)
+		rand.Read(b)
+		token := base64.URLEncoding.EncodeToString(b)
+		res.NextContinuationToken = token
 	}
 
 	if delimiter != "" {
@@ -729,7 +746,7 @@ func GetObjectsHandler(w http.ResponseWriter, r *http.Request) {
 
 	len := 0
 	for _, object := range objects {
-		if len > 1000 {
+		if len >= int(maxKeys) {
 			break
 		}
 
